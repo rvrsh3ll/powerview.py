@@ -1,43 +1,52 @@
 from setuptools import setup
+from powerview._version import __version__
 
-setup(name='powerview',
-      version='0.5.1',
-      description='Python based PowerView script',
-      author='Aniq Fakhrul',
-      author_email='aniqfakhrull@gmail.com',
-      maintainer='Aniq Fakhrul',
-      maintainer_email='aniqfakhrull@gmail.com',
-      url='https://github.com/aniqfakhrul/powerview.py',
-      packages=['powerview',
-                'powerview.utils',
-                'powerview.modules',
-                'powerview.lib'
-                ],
-      license='MIT',
-      install_requires=[
-          'ldap3',
-          'dnspython==2.2.1',
-          'future',
-          'gnureadline',
-          'impacket>=0.10.0',
-          'validators',
-          'dsinternals',
-          'pycryptodome',
-          'chardet',
-          'tabulate',
-          'argcomplete',
-      ],
-      classifiers=[
-        'Intended Audience :: Information Technology',
-        'License :: OSI Approved :: MIT License',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
-        'Programming Language :: Python :: 3.10',
-      ],
-      entry_points= {
-        'console_scripts': ['powerview=powerview:main']
-      }
-    )
+setup(
+	name='powerview',
+	version=__version__,
+	description='Python based PowerView script',
+	author='Aniq Fakhrul',
+	author_email='aniqfakhrull@gmail.com',
+	maintainer='Aniq Fakhrul',
+	maintainer_email='aniqfakhrull@gmail.com',
+	url='https://github.com/aniqfakhrul/powerview.py',
+	long_description=open('README.md').read(),
+	long_description_content_type='text/markdown',
+	packages=[
+		'powerview',
+        'powerview.utils',
+        'powerview.modules',
+        'powerview.lib',
+        'powerview.web'
+    ],
+	license='MIT',
+	install_requires=[
+		'impacket',
+		'ldap3-bleeding-edge',
+		'dnspython',
+		'future',
+		'gnureadline',
+		'validators',
+		'dsinternals',
+		'chardet',
+		'tabulate',
+		'argparse',
+		'requests_ntlm',
+		'python-dateutil',
+		'flask',
+	],
+	classifiers=[
+		'Intended Audience :: Information Technology',
+		'License :: OSI Approved :: MIT License',
+		'Programming Language :: Python :: 3.5',
+		'Programming Language :: Python :: 3.6',
+		'Programming Language :: Python :: 3.7',
+		'Programming Language :: Python :: 3.8',
+		'Programming Language :: Python :: 3.9',
+		'Programming Language :: Python :: 3.10',
+		'Programming Language :: Python :: 3.11',
+	],
+	entry_points= {
+		'console_scripts': ['powerview=powerview:main']
+	}
+)

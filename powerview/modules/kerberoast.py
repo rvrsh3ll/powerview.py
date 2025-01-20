@@ -72,7 +72,7 @@ class GetUserSPNs:
         for row in items:
             print(outputFormat.format(*row))
 
-    def __init__(self, username, password, user_domain, target_domain, cmdLineOptions, identity=None, options=None, encType=None):
+    def __init__(self, username, password, user_domain, target_domain, cmdLineOptions, identity=None, options=None, encType=None, TGT=None):
         self.__username = username
         self.__password = password
         self.__domain = user_domain
@@ -83,6 +83,7 @@ class GetUserSPNs:
         self.__doKerberos = cmdLineOptions.use_kerberos
         self.__requestTGS = True
         self.__kdcHost = cmdLineOptions.dc_ip
+        self.__TGT = TGT
         self.__requestUser = identity
         if cmdLineOptions.hashes is not None:
             self.__lmhash, self.__nthash = cmdLineOptions.hashes.split(':')
@@ -123,12 +124,6 @@ class GetUserSPNs:
                 # information. This also works around the current SMB3 bug
                 pass
         return "%s.%s" % (s.getServerName(), s.getServerDNSDomainName())
-
-    @staticmethod
-    def getUnixTime(t):
-        t -= 116444736000000000
-        t /= 10000000
-        return t
 
     def getTGT(self, encType):
         if self.__doKerberos:
@@ -213,14 +208,6 @@ class GetUserSPNs:
                 decodedTGS['ticket']['enc-part']['etype']))
 
     def run(self, entries):
-        if self.__doKerberos:
-            target = self.getMachineName()
-        else:
-            if self.__kdcHost is not None and self.__targetDomain == self.__domain:
-                target = self.__kdcHost
-            else:
-                target = self.__targetDomain
-
         answers = []
         entries_out = []
         entry_out = {}
@@ -229,7 +216,7 @@ class GetUserSPNs:
         for entry in entries:
             mustCommit = False
             sAMAccountName =  ''
-            dn = entry.entry_dn
+            dn = entry.get('dn')
             memberOf = ''
             SPNs = []
             pwdLastSet = ''
@@ -237,23 +224,15 @@ class GetUserSPNs:
             lastLogon = 'N/A'
             delegation = ''
             try:
-                item = json.loads(entry.entry_to_json())
-                entry_out['attributes'] = {'distinguishedName':dn}
-                for attribute,value in item['attributes'].items():
+                entry_out['attributes'] = {'distinguishedName': dn}
+                for attribute,value in entry['attributes'].items():
                     if str(attribute) == 'sAMAccountName':
-                        sAMAccountName = str(value[0])
+                        sAMAccountName = entry['attributes']['sAMAccountName'][0] if isinstance(entry['attributes']['sAMAccountName'], list) else entry['attributes']['sAMAccountName']
                         mustCommit = True
-                    #elif str(attribute) == 'userAccountControl':
-                    #    userAccountControl = str(value[0])
-                    #    if int(userAccountControl) & UF_TRUSTED_FOR_DELEGATION:
-                    #        delegation = 'unconstrained'
-                    #    elif int(userAccountControl) & UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION:
-                    #        delegation = 'constrained'
                     elif str(attribute) == 'memberOf':
-                        memberOf = str(value[0])
+                        memberOf = entry['attributes']['memberOf']
                     elif str(attribute) == 'servicePrincipalName':
-                        for spn in value:
-                            SPNs.append(str(spn))
+                        SPNs = entry['attributes']['servicePrincipalName'] if isinstance(entry['attributes']['servicePrincipalName'], list) else [entry['attributes']['servicePrincipalName']]
                 if mustCommit is True:
                     if int(userAccountControl) & UF_ACCOUNTDISABLE:
                         logging.debug('Bypassing disabled account %s ' % sAMAccountName)
@@ -269,11 +248,15 @@ class GetUserSPNs:
                 # Let's get unique user names and a SPN to request a TGS for
                 users = dict( (vals[1], vals[0]) for vals in answers)
 
+                TGT = None
+
                 # Check for forced encryption
                 enctype = self.__encryption
 
-                # Get a TGT for the current user
-                TGT = self.getTGT(enctype)
+                if self.__TGT and not enctype:
+                    TGT = self.__TGT
+                else:
+                    TGT = self.getTGT(enctype)
 
                 # convert hex to binary
                 kdcopt = self.__options
@@ -294,7 +277,7 @@ class GetUserSPNs:
                         kdc_opts.append(constants.KDCOptions(idx).name)
 
                 logging.debug("Using KDC Options (" + ','.join(kdc_opts) + ")")
-
+                
                 for user, SPN in users.items():
                     sAMAccountName = user
                     downLevelLogonName = self.__targetDomain + "\\" + sAMAccountName

@@ -8,6 +8,7 @@ from powerview.lib.resolver import (
 from powerview import PowerView as PV
 from powerview.utils.logging import LOG
 from powerview.utils.helpers import IDict
+from powerview.utils.constants import TABLE_FMT_MAP
 
 import ldap3
 import json
@@ -16,6 +17,8 @@ import logging
 import base64
 import datetime
 from tabulate import tabulate as table
+from io import StringIO
+import csv
 
 class FORMATTER:
     def __init__(self, pv_args, use_kerberos=False):
@@ -27,11 +30,23 @@ class FORMATTER:
         print(len(entries))
 
     def print_table(self, entries: list, headers: list, align: str = None):
+        table_format = TABLE_FMT_MAP.get(self.args.tableview, "simple")
+        filtered_entries = [entry for entry in entries if not all(e == '' for e in entry)]
         print()
-        table_res = table(
-            entries,
-            headers,
-            numalign="left" if not align else align
+        if table_format == "csv":
+            output = StringIO()
+            csv_writer = csv.writer(output,quoting=csv.QUOTE_ALL)
+            if headers:
+                csv_writer.writerow(headers)
+            csv_writer.writerows(filtered_entries)
+            table_res = output.getvalue()
+            output.close()
+        else:
+            table_res = table(
+                filtered_entries,
+                headers,
+                numalign="left" if not align else align,
+                tablefmt=table_format
             )
         if self.args.outfile:
             LOG.write_to_file(self.args.outfile, table_res)
@@ -39,7 +54,7 @@ class FORMATTER:
         print()
 
     def print_index(self, entries):
-        i = int(self.args.select)
+        i = self.args.select
         for entry in entries[0:i]:
             if isinstance(entry,ldap3.abstract.entry.Entry) or isinstance(entry['attributes'], dict) or isinstance(entry['attributes'], ldap3.utils.ciDict.CaseInsensitiveDict):
                 if isinstance(entry, ldap3.abstract.entry.Entry):
@@ -84,7 +99,7 @@ class FORMATTER:
                     print()
 
     def print_select(self,entries):
-        select_attributes = self.args.select.split(",")
+        select_attributes = self.args.select
         for entry in entries:
             if isinstance(entry,ldap3.abstract.entry.Entry) or isinstance(entry['attributes'], dict) or isinstance(entry['attributes'], ldap3.utils.ciDict.CaseInsensitiveDict):
                 if isinstance(entry, ldap3.abstract.entry.Entry):
@@ -146,11 +161,11 @@ class FORMATTER:
         headers = []
         rows = []
         nested_list = False
-        if (hasattr(self.args, "select") and self.args.select) or (hasattr(self.args, "properties") and self.args.properties):
+        if (hasattr(self.args, "select") and self.args.select) or (hasattr(self.args, "properties") and self.args.properties and not self.args.properties == '*'):
             if self.args.select:
-                headers = self.args.select.split(",")
+                headers = self.args.select
             elif self.args.properties:
-                headers = self.args.properties.split(",")
+                headers = self.args.properties
         else:
             if isinstance(entries[0]["attributes"], dict) or isinstance(entries[0]["attributes"], ldap3.utils.ciDict.CaseInsensitiveDict):
                 headers = entries[0]["attributes"].keys()
@@ -273,6 +288,38 @@ class FORMATTER:
                 if self.args.outfile:
                     LOG.write_to_file(self.args.outfile, entry)
                 print(entry)
+
+    def sort_entries(self, entries, sort_option):
+        try:
+            def sort_key(entry):
+                if sort_option.lower() not in [v.lower() for v in entry["attributes"].keys()]:
+                    raise Exception("%s key not found" % (sort_option))
+
+                if not isinstance(entry["attributes"], ldap3.utils.ciDict.CaseInsensitiveDict):
+                    entry["attributes"] = IDict(entry["attributes"])
+
+                value = entry['attributes'].get(sort_option)
+                if isinstance(value, str):
+                    return value.lower()
+                elif isinstance(value, list):
+                    if sort_option.lower() in ["badpasswordtime", "lastlogoff", "lastlogon", "pwdlastset", "lastlogontimestamp"]:
+                        return datetime.datetime.min
+                    else:
+                        return value
+                else:
+                    logging.warning("Value not compatible for sorting. Skipping...")
+                    return value
+
+            sorted_users = sorted(entries, key=sort_key)
+            return sorted_users
+        except AttributeError:
+            logging.warning("Failed to sort. Probably value is not a string. Skipping...")
+            return entries
+        except KeyError as e:
+            raise KeyError("%s key not found" % str(e))
+        finally:
+            logging.warning("Failed sort to with unknown error")
+            return entries
 
     def alter_entries(self,entries,cond):
         temp_alter_entries = []

